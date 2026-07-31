@@ -1,0 +1,100 @@
+SELECT
+  s.customer,
+  s.total,
+  s.blocked,
+  s.passed,
+  s.alerted,
+  ROUND(a.avg_per_hour, 2)   AS avg_1h,
+  p.peak_per_hour          AS peak_1h,
+  ROUND(m.avg_req_min, 2)  AS avg_req_min
+FROM
+(
+  -- Total counts per customer in last 24h
+  SELECT
+    customer,
+    COUNT(*) AS total,
+    SUM(CASE WHEN action='blocked' THEN 1 ELSE 0 END)  AS blocked,
+    SUM(CASE WHEN action='passed'  THEN 1 ELSE 0 END)  AS passed,
+    SUM(CASE WHEN action='alarmed' THEN 1 ELSE 0 END)  AS alerted
+  FROM "syslog"
+  WHERE
+    _timestamp >= now() - interval '24 hours'
+    AND customer IS NOT NULL
+    AND TRIM(customer) <> ''
+    AND LOWER(TRIM(customer)) <> 'unknown'
+  GROUP BY customer
+) AS s
+
+LEFT JOIN 
+(
+  -- Average per hour (mean of 1h buckets) over last 24h
+  SELECT
+    customer,
+    AVG(bucket_count) AS avg_per_hour
+  FROM
+  (
+    SELECT
+      histogram(_timestamp, '1 hour') AS bucket,
+      customer,
+      COUNT(*) AS bucket_count
+    FROM "syslog"
+    WHERE
+      _timestamp >= now() - interval '24 hours'
+      AND customer IS NOT NULL
+      AND TRIM(customer) <> ''
+      AND LOWER(TRIM(customer)) <> 'unknown'
+    GROUP BY bucket, customer
+  ) t
+  GROUP BY customer
+) AS a
+  ON s.customer = a.customer
+
+LEFT JOIN
+(
+  -- Peak per hour (max of 1h buckets) over last 24h
+  SELECT
+    customer,
+    MAX(bucket_count) AS peak_per_hour
+  FROM
+  (
+    SELECT
+      histogram(_timestamp, '1 hour') AS bucket,
+      customer,
+      COUNT(*) AS bucket_count
+    FROM "syslog"
+    WHERE
+      _timestamp >= now() - interval '24 hours'
+      AND customer IS NOT NULL
+      AND TRIM(customer) <> ''
+      AND LOWER(TRIM(customer)) <> 'unknown'
+    GROUP BY bucket, customer
+  ) t
+  GROUP BY customer
+) AS p
+  ON s.customer = p.customer
+
+LEFT JOIN
+(
+  -- Average requests per minute (mean of 1m buckets) over last 24h
+  SELECT
+    customer,
+    AVG(bucket_count) AS avg_req_min
+  FROM
+  (
+    SELECT
+      histogram(_timestamp, '1 minute') AS bucket,
+      customer,
+      COUNT(*) AS bucket_count
+    FROM "syslog"
+    WHERE
+      _timestamp >= now() - interval '24 hours'
+      AND customer IS NOT NULL
+      AND TRIM(customer) <> ''
+      AND LOWER(TRIM(customer)) <> 'unknown'
+    GROUP BY bucket, customer
+  ) t
+  GROUP BY customer
+) AS m
+  ON s.customer = m.customer
+
+ORDER BY s.total DESC;
