@@ -217,3 +217,61 @@ If you want, I’ll write the **next step as JSON**: one dashboard panel definit
 
 [1]: https://openobserve.ai/docs/user-guide/analytics/dashboards/panels/multi-query-support/?utm_source=chatgpt.com "Multi-Query Support in Dashboard Panels"
 [2]: https://openobserve.ai/docs/reference/sql-reference/?utm_source=chatgpt.com "SQL Reference - OpenObserve Documentation"
+
+
+
+
+
+
+
+
+SELECT
+    s.customer,
+    s.total,
+    s.blocked,
+    s.passed,
+    s.alerted,
+    ROUND(a.avg_per_hour, 2) AS avg_per_hour
+FROM
+(
+    SELECT
+        customer,
+        COUNT(*) AS total,
+        SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END) AS blocked,
+        SUM(CASE WHEN action = 'passed' THEN 1 ELSE 0 END) AS passed,
+        SUM(CASE WHEN action = 'alerted' THEN 1 ELSE 0 END) AS alerted
+    FROM "syslog"
+    WHERE
+        customer IS NOT NULL
+        AND TRIM(customer) <> ''
+        AND LOWER(TRIM(customer)) <> 'unknown'
+    GROUP BY customer
+) s
+
+LEFT JOIN
+
+(
+    SELECT
+        customer,
+        AVG(bucket_count) AS avg_per_hour
+    FROM
+    (
+        SELECT
+            histogram(_timestamp,'1 hour') AS bucket,
+            customer,
+            COUNT(*) AS bucket_count
+        FROM "syslog"
+        WHERE
+            customer IS NOT NULL
+            AND TRIM(customer) <> ''
+            AND LOWER(TRIM(customer)) <> 'unknown'
+        GROUP BY
+            bucket,
+            customer
+    ) t
+    GROUP BY customer
+) a
+
+ON s.customer = a.customer
+
+ORDER BY s.total DESC;
