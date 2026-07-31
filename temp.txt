@@ -1,13 +1,219 @@
+You are right to push for a production answer. The clean way in OpenObserve is:
+
+* use **multi-query SQL panels** for side-by-side comparisons,
+* and use **panel-level time ranges** so each panel can ignore the dashboard’s global selector. OpenObserve documents both multi-query SQL panels and panel-level time ranges. ([openobserve.ai][1])
+
+Your BIG-IP ASM CEF logs already contain the fields you need for this dashboard: `cs1` for policy name, `act` for request status, `cs4` for attack type, `cs6` for geo, and `rt` for event time. 
+
+## 1) VRL change, only if `customer` is not already created
+
+If your pipeline does not already expose `customer`, add this tiny normalization function after CEF parsing:
+
+```vrl
+if exists(.cs1) {
+  .customer = string!(.cs1)
+}
+
+if exists(.act) {
+  .request_status = string!(.act)
+}
+
+if exists(.cs4) {
+  .attack_type = string!(.cs4)
+}
+
+if exists(.cs6) {
+  .country = string!(.cs6)
+}
+
+if exists(.rt) {
+  .event_time_raw = string!(.rt)
+}
+```
+
+If `customer` already exists and looks correct in the table, skip this.
+
+## 2) Your current totals query is fine
+
+Use this for the main customer-wise status table:
+
+```sql
 SELECT
-    customer,
-    COUNT(*) AS total,
-    SUM(CASE WHEN action='blocked' THEN 1 ELSE 0 END) AS blocked,
-    SUM(CASE WHEN action='alerted' THEN 1 ELSE 0 END) AS alerted,
-    SUM(CASE WHEN action='passed' THEN 1 ELSE 0 END) AS passed
+  customer,
+  SUM(CASE WHEN act = 'blocked' THEN 1 ELSE 0 END) AS blocked,
+  SUM(CASE WHEN act = 'passed' THEN 1 ELSE 0 END) AS passed,
+  SUM(CASE WHEN act = 'alarmed' THEN 1 ELSE 0 END) AS alerted,
+  COUNT(*) AS total
 FROM "syslog"
-WHERE
-    customer IS NOT NULL
-    AND TRIM(customer) <> ''
-    AND LOWER(TRIM(customer)) <> 'unknown'
 GROUP BY customer
 ORDER BY total DESC;
+```
+
+This is the correct replacement for your current `COUNT(*) AS total` plus `SUM(CASE...)` query.
+
+## 3) Production pattern for averages
+
+Do **not** calculate averages from the selected dashboard range with `COUNT(*) / 15` or `AVG(action)`. That will never give the metrics you want.
+
+Instead, use `histogram()` to bucket the time range, then take the average of the bucket counts. OpenObserve documents `histogram()` specifically for fixed time buckets and time-series analysis. ([openobserve.ai][2])
+
+### A. Average over the selected panel range, per minute
+
+Use this for the panel whose time range is whatever the user selected in the dashboard:
+
+```sql
+SELECT
+  customer,
+  ROUND(AVG(bucket_count), 2) AS avg_per_min
+FROM (
+  SELECT
+    histogram(_timestamp, '1 minute') AS bucket,
+    customer,
+    COUNT(*) AS bucket_count
+  FROM "syslog"
+  GROUP BY bucket, customer
+) t
+GROUP BY customer
+ORDER BY avg_per_min DESC;
+```
+
+If the selected range is 15 minutes, this gives the 15-minute average per minute.
+If the selected range is 1 hour, it gives the 1-hour average per minute.
+
+### B. Last 1 hour average per minute
+
+Create a second panel and set its panel time range to **Last 1 hour**:
+
+```sql
+SELECT
+  customer,
+  ROUND(AVG(bucket_count), 2) AS avg_per_min
+FROM (
+  SELECT
+    histogram(_timestamp, '1 minute') AS bucket,
+    customer,
+    COUNT(*) AS bucket_count
+  FROM "syslog"
+  GROUP BY bucket, customer
+) t
+GROUP BY customer
+ORDER BY avg_per_min DESC;
+```
+
+### C. Last 24 hours average per hour
+
+Create a third panel with panel time range **Last 24 hours**:
+
+```sql
+SELECT
+  customer,
+  ROUND(AVG(bucket_count), 2) AS avg_per_hour
+FROM (
+  SELECT
+    histogram(_timestamp, '1 hour') AS bucket,
+    customer,
+    COUNT(*) AS bucket_count
+  FROM "syslog"
+  GROUP BY bucket, customer
+) t
+GROUP BY customer
+ORDER BY avg_per_hour DESC;
+```
+
+### D. Last 7 days average per day
+
+Create a fourth panel with panel time range **Last 7 days**:
+
+```sql
+SELECT
+  customer,
+  ROUND(AVG(bucket_count), 2) AS avg_per_day
+FROM (
+  SELECT
+    histogram(_timestamp, '1 day') AS bucket,
+    customer,
+    COUNT(*) AS bucket_count
+  FROM "syslog"
+  GROUP BY bucket, customer
+) t
+GROUP BY customer
+ORDER BY avg_per_day DESC;
+```
+
+### E. Current week average per day
+
+Create a fifth panel with time range **This week**:
+
+```sql
+SELECT
+  customer,
+  ROUND(AVG(bucket_count), 2) AS avg_per_day
+FROM (
+  SELECT
+    histogram(_timestamp, '1 day') AS bucket,
+    customer,
+    COUNT(*) AS bucket_count
+  FROM "syslog"
+  GROUP BY bucket, customer
+) t
+GROUP BY customer
+ORDER BY avg_per_day DESC;
+```
+
+### F. Last week average per day
+
+Create a sixth panel with time range **Previous week**:
+
+```sql
+SELECT
+  customer,
+  ROUND(AVG(bucket_count), 2) AS avg_per_day
+FROM (
+  SELECT
+    histogram(_timestamp, '1 day') AS bucket,
+    customer,
+    COUNT(*) AS bucket_count
+  FROM "syslog"
+  GROUP BY bucket, customer
+) t
+GROUP BY customer
+ORDER BY avg_per_day DESC;
+```
+
+## 4) How to build the dashboard correctly
+
+OpenObserve supports SQL-based table panels with multiple queries, but the **time window is panel-scoped**, so the production setup is to use **one dashboard tab with multiple panels**, not force six different windows into a single time scope. OpenObserve also supports auto-refresh and panel-level time configuration. ([openobserve.ai][1])
+
+So the dashboard layout should be:
+
+* Panel 1: **Current selected range totals**
+* Panel 2: **Last 1 hour avg/min**
+* Panel 3: **Last 24 hours avg/hour**
+* Panel 4: **Last 7 days avg/day**
+* Panel 5: **This week avg/day**
+* Panel 6: **Previous week avg/day**
+
+That gives you exactly what you asked for, without breaking OpenObserve’s time model.
+
+## 5) If you want one customer table with all columns
+
+Use this table shape:
+
+```sql
+SELECT
+  customer,
+  SUM(CASE WHEN act = 'blocked' THEN 1 ELSE 0 END) AS blocked,
+  SUM(CASE WHEN act = 'passed' THEN 1 ELSE 0 END) AS passed,
+  SUM(CASE WHEN act = 'alarmed' THEN 1 ELSE 0 END) AS alerted,
+  COUNT(*) AS total
+FROM "syslog"
+GROUP BY customer
+ORDER BY total DESC;
+```
+
+Then place the average panels right next to it. That is the most reliable enterprise layout in OpenObserve.
+
+If you want, I’ll write the **next step as JSON**: one dashboard panel definition for **Current Totals**, then the 5 average panels, using your exported OpenObserve dashboard schema.
+
+[1]: https://openobserve.ai/docs/user-guide/analytics/dashboards/panels/multi-query-support/?utm_source=chatgpt.com "Multi-Query Support in Dashboard Panels"
+[2]: https://openobserve.ai/docs/reference/sql-reference/?utm_source=chatgpt.com "SQL Reference - OpenObserve Documentation"
