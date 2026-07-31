@@ -1,0 +1,13 @@
+SELECT
+    customer,
+    COUNT(*) AS total,
+    SUM(CASE WHEN action='blocked' THEN 1 ELSE 0 END) AS blocked,
+    SUM(CASE WHEN action='alerted' THEN 1 ELSE 0 END) AS alerted,
+    SUM(CASE WHEN action='passed' THEN 1 ELSE 0 END) AS passed
+FROM "syslog"
+WHERE
+    customer IS NOT NULL
+    AND TRIM(customer) <> ''
+    AND LOWER(TRIM(customer)) <> 'unknown'
+GROUP BY customer
+ORDER BY total DESC;
