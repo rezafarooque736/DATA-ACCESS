@@ -98,3 +98,17 @@ LEFT JOIN
   ON s.customer = m.customer
 
 ORDER BY s.total DESC;
+
+
+
+
+WITH t AS
+(
+SELECT
+customer,
+COUNT(*) AS total
+FROM "syslog"
+GROUP BY customer
+)
+SELECT *
+FROM t;
